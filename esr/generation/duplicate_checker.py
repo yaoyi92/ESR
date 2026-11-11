@@ -38,6 +38,7 @@ def main(
     seed=1234,
     diagnose_numerical_duplicates=False,
     fn_dir=None,
+    prune_redundant=False,
 ):
     """Run the generation of functions for a given complexity and set of basis functions
 
@@ -60,6 +61,16 @@ def main(
             used. Pass ``likelihood.fn_dir`` here to generate straight into the
             location a likelihood object reads from (e.g. an isolated directory
             for a test), keeping generation and fitting consistent.
+        :prune_redundant (bool, default=False): whether to skip trees which
+            are certain to be redundant while generating them, instead of
+            generating every tree and leaving sympy to find the duplicates
+            (see ``esr.generation.pruning``). Trees which only reorder a sum
+            or product, or which are equivalent to a smaller tree made from a
+            subset of the same operators, are never produced. This is much
+            faster, but a function which already exists at a lower complexity
+            no longer reappears at this one, so the catalogue must be used
+            together with those of all lower complexities, and the number of
+            unique equations per complexity differs from an unpruned run.
 
     Returns:
         None
@@ -125,7 +136,9 @@ def main(
     sys.stdout.flush()
     comm.Barrier()
 
-    all_fun, extra_orig = generator.generate_equations(compl, basis_functions, dirname)
+    all_fun, extra_orig = generator.generate_equations(
+        compl, basis_functions, dirname, prune=prune_redundant
+    )
 
     if rank == 0 and track_memory:
         utils.using_mem("generated")

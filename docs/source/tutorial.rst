@@ -45,6 +45,40 @@ description-length interpretation. Numerical candidates should be merged
 only after an application-specific exact equivalence check.
 
 
+Skipping redundant trees during generation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default every labelling of every tree is generated, and the symbolic
+simplification is left to discover which of them are duplicates. Most of
+those trees are predictably redundant, and can instead be skipped as they are
+generated:
+
+.. code-block:: python
+
+	esr.generation.duplicate_checker.main(
+		runname, comp, prune_redundant=True)
+
+A tree is skipped only if an equivalent tree which cannot have a longer
+description is certain to be generated as well (see
+``esr.generation.pruning``):
+
+* trees which only reorder the operands of a sum or product, of which exactly
+  one ordering is kept;
+* trees which are equivalent to a smaller tree built from a subset of the
+  same operators: those containing a subtree made only of parameters (which
+  is itself just a parameter), ``inv(inv(f))``, two bare parameters in one
+  sum or difference, or a parameter multiplying or dividing something which
+  can already absorb an overall scale, such as ``a0 * (a1 * x)``.
+
+This greatly reduces the number of expressions passed to the simplification
+(by a factor of more than four at complexity 8 for ``core_maths``). Note that
+the second set of rules means a function which already exists at a lower
+complexity is no longer repeated at a higher one. A catalogue generated in
+this way must therefore be used together with the catalogues of all lower
+complexities, and its number of unique equations at a given complexity is
+smaller than that of the default generation.
+
+
 Choosing a function set
 ~~~~~~~~~~~~~~~~~~~~~~~
 

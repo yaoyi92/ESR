@@ -9,7 +9,7 @@ from mpi4py import MPI
 from sympy.core.sympify import kernS
 
 from esr.fitting.sympy_symbols import sympy_locs
-from esr.generation import simplifier, utils
+from esr.generation import pruning, simplifier, utils
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -2066,12 +2066,14 @@ def find_additional_trees(tree, labels, basis_functions):
     return new_tree, new_labels
 
 
-def shape_to_functions(s, basis_functions):
+def shape_to_functions(s, basis_functions, prune=False, seen_extra=None):
     """Find all possible functions formed from the given list of 0s, 1s and 2s defining a tree and basis functions
 
     Args:
         :s (str): string comprised of 0, 1 and 2 representing tree of nullary, unary and binary nodes
         :basis_functions (list): list of lists basis functions. basis_functions[0] are nullary, basis_functions[1] are unary and basis_functions[2] are binary operators
+        :prune (bool, default=False): whether to skip trees which esr.generation.pruning identifies as redundant (True) or to generate every labelling of the tree (False)
+        :seen_extra (set, default=None): if not None, keys of the extra trees already found on the root rank. Extra trees in this set are dropped and new ones are added to it, so that each distinct extra tree is only kept once, in one ordering of its sums and products
 
     Returns:
         :all_fun (list): list of strings containing all functions generated directly from tree
@@ -2098,13 +2100,6 @@ def shape_to_functions(s, basis_functions):
 
     _success, _part_considered, tree = check_tree(s)
 
-    all_fun = [None] * (len(t0) * len(t1) * len(t2))
-    if rank == 0:
-        all_tree = [None] * (len(t0) * len(t1) * len(t2))
-    else:
-        all_tree = None
-
-    pos = 0
     labels = np.empty(len(s), dtype="U100")
     m0 = s == 0
     m1 = s == 1
@@ -2118,39 +2113,88 @@ def shape_to_functions(s, basis_functions):
     extra_fun = []
     extra_orig = []
 
-    i = utils.split_idx(len(t0) * len(t1) * len(t2), rank, size)
-    if len(i) == 0:
-        imin = 0
-        imax = 0
+    def add_extra(labels, fun=None):
+        new_tree, new_labels = find_additional_trees(
+            tree, list(labels), basis_functions
+        )
+        if len(new_tree) > 1:
+            rename = {}
+            if fun is None:
+                # The original is not kept: refer to the reordering which is,
+                # and name the parameters as they are named there
+                orig, rename = canonical_labels([str(lab) for lab in labels])
+                _, _, t = check_tree(np.array(labels_to_shape(orig, basis_functions)))
+                fun = node_to_string(0, t, orig)
+            for n in range(1, len(new_tree)):
+                lab = [rename.get(str(v), v) for v in new_labels[n]]
+                extra_tree.append(lab)
+                extra_fun.append(node_to_string(0, new_tree[n], lab))
+                extra_orig.append(fun)
+
+    if prune:
+        # Every rank finds the same surviving trees, and only then is the
+        # search for extra trees shared out between the ranks
+        # The search for extra trees depends on the order of the operands, so
+        # it must also see the reorderings which are not kept
+        classify, _, canonical_labels = pruning.make_classifier(basis_functions)
+        kept = []
+        reordered = []
+        for i in range(len(t0)):
+            for j in range(len(t1)):
+                for k in range(len(t2)):
+                    labels[:] = None
+                    labels[m0] = t0[i, :]
+                    labels[m1] = t1[j, :]
+                    labels[m2] = t2[k, :]
+                    status = classify(labels.tolist())
+                    if status == pruning.KEEP:
+                        kept.append(labels.copy())
+                    elif status == pruning.REORDERED:
+                        reordered.append(labels.copy())
+
+        all_fun = [node_to_string(0, tree, lab) for lab in kept]
+        all_tree = kept if rank == 0 else None
+
+        i = utils.split_idx(len(kept) + len(reordered), rank, size)
+        if len(i) > 0:
+            for pos in range(i[0], i[-1] + 1):
+                if pos < len(kept):
+                    add_extra(kept[pos], all_fun[pos])
+                else:
+                    add_extra(reordered[pos - len(kept)])
     else:
-        imin = i[0]
-        imax = i[-1] + 1
+        all_fun = [None] * (len(t0) * len(t1) * len(t2))
+        if rank == 0:
+            all_tree = [None] * (len(t0) * len(t1) * len(t2))
+        else:
+            all_tree = None
 
-    for i in range(len(t0)):
-        for j in range(len(t1)):
-            for k in range(len(t2)):
+        pos = 0
 
-                labels[:] = None
-                labels[m0] = t0[i, :]
-                labels[m1] = t1[j, :]
-                labels[m2] = t2[k, :]
+        i = utils.split_idx(len(t0) * len(t1) * len(t2), rank, size)
+        if len(i) == 0:
+            imin = 0
+            imax = 0
+        else:
+            imin = i[0]
+            imax = i[-1] + 1
 
-                if rank == 0:
-                    all_tree[pos] = labels.copy()
-                all_fun[pos] = node_to_string(0, tree, labels)
+        for i in range(len(t0)):
+            for j in range(len(t1)):
+                for k in range(len(t2)):
 
-                if (pos >= imin) and (pos < imax):
-                    new_tree, new_labels = find_additional_trees(
-                        tree, list(labels), basis_functions
-                    )
-                    if len(new_tree) > 1:
-                        for n in range(1, len(new_tree)):
-                            extra_tree.append(new_labels[n].copy())
-                            extra_fun.append(
-                                node_to_string(0, new_tree[n], new_labels[n])
-                            )
-                            extra_orig.append(all_fun[pos])
-                pos += 1
+                    labels[:] = None
+                    labels[m0] = t0[i, :]
+                    labels[m1] = t1[j, :]
+                    labels[m2] = t2[k, :]
+
+                    if rank == 0:
+                        all_tree[pos] = labels.copy()
+                    all_fun[pos] = node_to_string(0, tree, labels)
+
+                    if (pos >= imin) and (pos < imax):
+                        add_extra(labels, all_fun[pos])
+                    pos += 1
 
     extra_tree = comm.gather(extra_tree, root=0)
     extra_fun = comm.gather(extra_fun, root=0)
@@ -2159,6 +2203,24 @@ def shape_to_functions(s, basis_functions):
         extra_tree = list(itertools.chain(*extra_tree))
         extra_fun = list(itertools.chain(*extra_fun))
         extra_orig = list(itertools.chain(*extra_orig))
+        if seen_extra is not None:
+            # The same extra tree is usually reached from several originals,
+            # in several orderings of its sums and products
+            _, canonical_key, _ = pruning.make_classifier(basis_functions)
+            keep = []
+            for n, t in enumerate(extra_tree):
+                key = tuple(str(lab) for lab in t)
+                try:
+                    key = canonical_key(list(key))
+                except ValueError:
+                    # Uses an operator from outside the basis set
+                    pass
+                if key not in seen_extra:
+                    seen_extra.add(key)
+                    keep.append(n)
+            extra_tree = [extra_tree[n] for n in keep]
+            extra_fun = [extra_fun[n] for n in keep]
+            extra_orig = [extra_orig[n] for n in keep]
     extra_fun = comm.bcast(extra_fun, root=0)
     extra_orig = comm.bcast(extra_orig, root=0)
 
@@ -2218,13 +2280,14 @@ def aifeyn_complexity(tree, param_list):
     return len(tree) * np.log(nop) + np.sum(np.log(np.abs(n)))
 
 
-def generate_equations(compl, basis_functions, dirname):
+def generate_equations(compl, basis_functions, dirname, prune=False):
     """Generate all equations at a given complexity for a set of basis functions and save results to file
 
     Args:
         :compl (int): complexity of functions to consider
         :basis_functions (list): list of lists basis functions. basis_functions[0] are nullary, basis_functions[1] are unary and basis_functions[2] are binary operators
         :dirname (str): directory path to save results in
+        :prune (bool, default=False): whether to skip redundant trees as they are generated (see esr.generation.pruning) and to keep each distinct extra tree only once. The resulting catalogue is only complete when combined with those of all lower complexities
 
     Returns:
         :all_fun (list): list of strings containing all functions generated
@@ -2264,13 +2327,16 @@ def generate_equations(compl, basis_functions, dirname):
 
     ntree = 0
     nextratree = 0
+    seen_extra = set() if (prune and rank == 0) else None
 
     for i in range(len(shapes)):
         if rank == 0:
             print(f"{i+1} of {len(shapes)}")
             sys.stdout.flush()
         all_fun[i], all_tree, extra_fun[i], extra_tree, extra_orig[i] = (
-            shape_to_functions(shapes[i], basis_functions)
+            shape_to_functions(
+                shapes[i], basis_functions, prune=prune, seen_extra=seen_extra
+            )
         )
 
         if rank == 0:
@@ -2321,6 +2387,9 @@ def generate_equations(compl, basis_functions, dirname):
     all_fun = list(itertools.chain(*all_fun))
     extra_fun = list(itertools.chain(*extra_fun))
     extra_orig = list(itertools.chain(*extra_orig))
+
+    if rank == 0 and prune:
+        print("\nNumber of trees after pruning:", len(all_fun))
 
     all_fun = all_fun + extra_fun
 
