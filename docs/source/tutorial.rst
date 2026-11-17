@@ -45,6 +45,53 @@ description-length interpretation. Numerical candidates should be merged
 only after an application-specific exact equivalence check.
 
 
+Generating functions without duplicates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``duplicate_checker.main`` builds every tree of a complexity and then removes
+duplicates with sympy, which misses many identities (e.g. ``a0*pow(a1, x)``
+and ``pow(a0, x)/a1``, or ``x*pow(x, a0) - x`` and ``pow(x, a0) - x``).
+``unique_enumerator.main`` instead builds each function once, at the lowest
+complexity at which it can be written, and generates every complexity up to
+the one given in one call:
+
+.. code-block:: python
+
+	import esr.generation.unique_enumerator
+
+	esr.generation.unique_enumerator.main("core_maths", 7)
+
+It accepts the same ``variables``, ``basis_functions`` and ``fn_dir`` options
+as ``duplicate_checker.main`` and writes the same files, so the fitting
+routines run unchanged on its output. As every function appears once,
+``all_equations`` and ``unique_equations`` are the same list and ``matches``
+is the identity; and a function is listed only at its lowest complexity
+rather than at every complexity at which it can be written.
+
+The method: functions are built bottom-up by complexity from the functions
+already kept (if a tree is as short as possible, so is each of its subtrees),
+and each one is identified by a numerical key rather than by symbolic
+simplification. A subtree of parameters only (``a0 + a1``, ``inv(a0)``,
+``exp(a0)``) is one constant, whose range follows from interval arithmetic.
+Two parametric families are the same if they fill the same affine subspace of
+function space after applying ``f``, ``1/f`` or ``log|f|`` (which covers
+reparametrisations such as ``a0*(x + a1)`` and ``a0*x + a1``), or if they take
+the same values over the reparametrisations ``a -> -a``, ``a -> 1/a`` and
+permutations of the parameters. Families with fewer independent directions
+than parameters (e.g. ``pow(a0, a1*x)``) are dropped as reparametrisations of
+smaller families. See the module docstring for details.
+
+Equality is tested numerically, so it is not a proof. For ``core_maths`` up to
+complexity 7, an independent check (fitting each family to members of the
+other) finds 7 pairs of equal families out of 1186, all related by a
+reparametrisation outside those above (e.g. ``pow(x, a0) - x*a1`` and
+``x*(pow(x, a0) - a1)``, related by ``a0 -> a0 + 1``), against about 1000
+repeats in the ``duplicate_checker`` catalogue. A family that fills all but a
+thin region of an affine subspace (e.g. ``(a0 - x)*(a1 - x)``, whose
+coefficients satisfy a discriminant condition) may be merged into the full
+family containing it.
+
+
 Choosing a function set
 ~~~~~~~~~~~~~~~~~~~~~~~
 

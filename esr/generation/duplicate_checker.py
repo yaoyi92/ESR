@@ -20,6 +20,52 @@ rank = comm.Get_rank()
 size = comm.Get_size()
 
 
+BUILTIN_BASIS_FUNCTIONS = {
+    "keep_duplicates": [
+        ["x", "a"],
+        ["square", "exp", "inv", "sqrt_abs", "log_abs"],
+        ["+", "*", "-", "/", "pow"],
+    ],
+    "core_maths": [["x", "a"], ["inv"], ["+", "*", "-", "/", "pow"]],
+    "ext_maths": [
+        ["x", "a"],
+        ["inv", "sqrt_abs", "square", "exp"],
+        ["+", "*", "-", "/", "pow"],
+    ],
+    "osc_maths": [["x", "a"], ["inv", "sin"], ["+", "*", "-", "/", "pow"]],
+    "base10_maths": [
+        ["x", "a"],
+        ["tenexp", "inv", "log10_abs"],
+        ["+", "*", "-", "/", "pow"],
+    ],
+    "base_e_maths": [
+        ["x", "a"],
+        ["inv", "exp", "log_abs"],
+        ["+", "*", "-", "/", "pow"],
+    ],
+}
+
+
+def builtin_basis_functions(runname):
+    """Basis functions ``[nullary, unary, binary]`` of a built-in function set.
+
+    Args:
+        :runname (str): name of the function set, e.g. ``"core_maths"``
+
+    Returns:
+        :basis_functions (list): a fresh copy of the basis, written in terms of ``x``
+
+    Raises:
+        ValueError: if ``runname`` is not a built-in function set
+    """
+    if runname not in BUILTIN_BASIS_FUNCTIONS:
+        raise ValueError(
+            f"Unknown runname {runname!r}: pass basis_functions to define a "
+            "custom function set"
+        )
+    return [list(b) for b in BUILTIN_BASIS_FUNCTIONS[runname]]
+
+
 def _validate_inverse_substitution_pairs(round_index, idx, inv):
     """Reject incomplete paired inverse-substitution artifacts.
 
@@ -128,47 +174,8 @@ def main(
     custom_basis = basis_functions is not None
     if custom_basis:
         basis_functions = [list(b) for b in basis_functions]
-    elif runname == "keep_duplicates":
-        basis_functions = [
-            ["x", "a"],  #  type0
-            ["square", "exp", "inv", "sqrt_abs", "log_abs"],  # type1
-            ["+", "*", "-", "/", "pow"],
-        ]  # type2
-    elif runname == "core_maths":
-        basis_functions = [
-            ["x", "a"],  #  type0
-            ["inv"],  # type1
-            ["+", "*", "-", "/", "pow"],
-        ]  # type2
-    elif runname == "ext_maths":
-        basis_functions = [
-            ["x", "a"],  #  type0
-            ["inv", "sqrt_abs", "square", "exp"],  # type1
-            ["+", "*", "-", "/", "pow"],
-        ]  # type2
-    elif runname == "osc_maths":
-        basis_functions = [
-            ["x", "a"],  #  type0
-            ["inv", "sin"],  # type1
-            ["+", "*", "-", "/", "pow"],
-        ]  # type2
-    elif runname == "base10_maths":
-        basis_functions = [
-            ["x", "a"],  #  type0
-            ["tenexp", "inv", "log10_abs"],  # type1
-            ["+", "*", "-", "/", "pow"],
-        ]  # type2
-    elif runname == "base_e_maths":
-        basis_functions = [
-            ["x", "a"],  # type0
-            ["inv", "exp", "log_abs"],  # type1
-            ["+", "*", "-", "/", "pow"],
-        ]  # type2
-    elif basis_functions is None:
-        raise ValueError(
-            f"Unknown runname {runname!r}: pass basis_functions to define a "
-            "custom function set"
-        )
+    else:
+        basis_functions = builtin_basis_functions(runname)
 
     basis_functions, variables = _apply_variables(
         basis_functions, variables, custom=custom_basis

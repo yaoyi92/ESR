@@ -91,6 +91,15 @@ variables" in the tutorial and ``examples/multivariable.py``.
 ``examples/feynman_multivariable.py`` recovers 11 laws from the AI Feynman
 dataset with up to three variables.
 
+Generating functions without duplicates
+=======================================
+
+``esr.generation.unique_enumerator.main("core_maths", comp)`` is an
+alternative to ``duplicate_checker.main`` that builds each function once, at
+its lowest complexity, identifying functions numerically instead of by
+symbolic simplification. It writes the same catalogue files, so fitting is
+unchanged. See "Generating functions without duplicates" in the tutorial.
+
 Fisher scoring and parameter snapping
 =====================================
 
