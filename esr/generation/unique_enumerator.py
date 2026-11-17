@@ -833,11 +833,18 @@ def _batched_least_squares(
         g = (J @ Rf[:, :, None])[:, :, 0]
         diag = np.einsum("pii->pi", A)
         A = A + lam[:, None, None] * (diag[:, :, None] * eye + 1e-12 * eye)
+        A = np.where(np.isfinite(A), A, 0.0)
+        g = np.where(np.isfinite(g), g, 0.0)
         try:
             step = -np.linalg.solve(A, g[:, :, None])[:, :, 0]
         except np.linalg.LinAlgError:
             # A singular system must not stop the other problems in the batch
-            step = -np.einsum("pij,pj->pi", np.linalg.pinv(A), g)
+            step = np.zeros_like(g)
+            for p in range(len(A)):
+                try:
+                    step[p] = -np.linalg.lstsq(A[p], g[p], rcond=None)[0]
+                except np.linalg.LinAlgError:
+                    pass
         step = np.where(np.isfinite(step), step, 0.0)
         Unew = U + step
         Rnew = evaluate(Unew) - Y
