@@ -152,7 +152,9 @@ def test_fit_from_string_multivariable(tmp_path):
         variables=["x", "y"],
     )
     basis = [["x", "y", "a"], ["inv"], ["+", "*", "-", "/", "pow"]]
-    _nll, DL, labels, params = fit_from_string("a0*x*y", basis, like, return_params=True)
+    _nll, DL, labels, params = fit_from_string(
+        "a0*x*y", basis, like, return_params=True
+    )
     assert "y" in labels and "x" in labels
     assert np.isclose(params[0], 2.0, rtol=1e-3)
     assert np.isfinite(DL)
@@ -194,3 +196,53 @@ def test_multivariable_pipeline(tmp_path, monkeypatch):
     with open(os.path.join(like.out_dir, "final_3.dat")) as f:
         best = f.readline().split(";")[1]
     assert best == "x*y"
+
+
+def test_merge_equal_expansions():
+    w, x, y, z = sympy_symbols.make_variables(["w", "x", "y", "z"])
+    fun = [
+        "y + (w - x)/z",
+        "y - (-w + x)/z",
+        "w + y/(x - z)",
+        "w - y/(-x + z)",
+        "zoo*(w - z)",
+        "x*y",
+    ]
+    loc = {"w": w, "x": x, "y": y, "z": z}
+    sym = [sympy.sympify(f, locals=loc).expand() for f in fun]
+    new_fun, new_sym = simplifier.merge_equal_expansions(fun, sym)
+    assert new_fun[0] == new_fun[1]
+    assert new_fun[2] == new_fun[3]
+    assert new_fun[0] != new_fun[2]
+    assert new_fun[4] == "nan" and new_sym[4] is sympy.nan
+    assert new_fun[5] == "x*y"
+
+
+def test_arithmetic_catalogue_has_no_redundancy(tmp_path):
+    # Expressions using each of n variables once with +, -, *, / and no
+    # repeated functions: 68 for n = 3 (cf. github.com/yaoyi92/enumerate-expressions)
+    variables = ["x", "y", "z"]
+    basis = [variables, [], ["+", "-", "*", "/"]]
+    for comp in [1, 3, 5]:
+        esr.generation.duplicate_checker.main(
+            "arith", comp, basis_functions=basis, fn_dir=str(tmp_path)
+        )
+    with open(tmp_path / "compl_5" / "unique_equations_5.txt") as f:
+        uniq = [s.strip().strip("'\"") for s in f.read().splitlines()]
+
+    syms = sympy_symbols.make_variables(variables)
+    loc = dict(zip(variables, syms))
+    points = [
+        dict(zip(syms, map(sympy.Integer, p)))
+        for p in [(3141592, 6535897, 9323846), (271828, 161803, 141421)]
+    ]
+    values = {}
+    for s in uniq:
+        e = sympy.sympify(s, locals=loc)
+        values.setdefault(tuple(str(e.subs(p)) for p in points), []).append(s)
+    assert [v for v in values.values() if len(v) > 1] == []
+
+    once_each = [
+        s for s in uniq if sorted(c for c in s if c.isalpha()) == sorted(variables)
+    ]
+    assert len(once_each) == 68

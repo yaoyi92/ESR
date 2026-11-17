@@ -1134,6 +1134,55 @@ def expand_or_factor(all_sym, tmax=1, method="expand"):
     return all_sym
 
 
+def merge_equal_expansions(all_fun, all_sym, tmax=1):
+    """Give functions without parameters a common label if they are the same function.
+
+    ``sympy_simplify`` does nothing for functions without parameters, so two
+    such functions that are written differently, e.g. ``y + (w - x)/z`` and
+    ``y - (-w + x)/z``, or ``w + y/(x - z)`` and ``w - y/(-x + z)``, would
+    otherwise both be kept. Each function is put in the canonical
+    numerator/denominator form of ``sympy.cancel`` (falling back to its
+    expanded form if that times out); without parameters, functions with the
+    same canonical form are identical, so every member of a group is
+    relabelled with the shortest (then alphabetically first) label. As in
+    ``sympy_simplify``, functions containing ``zoo`` are replaced by ``nan``,
+    and every function that is ``nan`` (e.g. ``zoo*(w - z)``, which expands
+    to ``nan``) is labelled ``nan``.
+
+    Args:
+        :all_fun (list): list of strings of functions without parameters
+        :all_sym (list): list of the corresponding expanded sympy objects
+        :tmax (float, default=1.): maximum time in seconds to spend putting
+            any one function in canonical form
+
+    Returns:
+        :all_fun (list): list of (updated) strings
+        :all_sym (list): list of (updated) sympy objects
+    """
+    esrp = ESRPrinter()
+    all_fun = list(all_fun)
+    all_sym = list(all_sym)
+    groups = {}
+    for k, s in enumerate(all_sym):
+        if s is not sympy.nan and sympy.zoo in s.atoms():
+            all_sym[k] = sympy.nan
+        if all_sym[k] is sympy.nan:
+            all_fun[k] = esrp.doprint(sympy.nan)
+            continue
+        try:
+            with time_limit(tmax):
+                key = esrp.doprint(sympy.cancel(s))
+        except TimeoutException:
+            key = esrp.doprint(s)
+        groups.setdefault(key, []).append(k)
+    for idx in groups.values():
+        if len(idx) > 1:
+            label = min((all_fun[k] for k in idx), key=lambda s: (len(s), s))
+            for k in idx:
+                all_fun[k] = label
+    return all_fun, all_sym
+
+
 def do_sympy(
     all_fun, all_sym, compl, search_tmax, expand_tmax, dirname, track_memory=False
 ):
@@ -1364,6 +1413,8 @@ def do_sympy(
                 for jj in j
             ]
             f, e, t = sympy_simplify(f, e, t, i, expand_fun=True, tmax=search_tmax)
+            if i == 0:
+                f, e = merge_equal_expansions(f, e, tmax=expand_tmax)
             for k in range(len(t)):
                 old_fun = uniq_fun[j[k]]
                 uniq_fun[j[k]] = f[k]
@@ -1572,14 +1623,13 @@ def load_subs(fname, max_param, use_sympy=True, bcast_res=True):
                 if sub != [""]:
                     all_subs[i] = sub
 
-    param_list = [f"a{i}" for i in range(max_param)]
-    all_a = sympy.symbols(" ".join(param_list), real=True)
-    if max_param == 1:
-        all_a = [all_a]
-
     locs = sympy_locs
 
     if max_param > 0:
+        param_list = [f"a{i}" for i in range(max_param)]
+        all_a = sympy.symbols(" ".join(param_list), real=True)
+        if max_param == 1:
+            all_a = [all_a]
         for i in range(len(all_a)):
             locs[f"a{i}"] = all_a[i]
 
@@ -1721,7 +1771,9 @@ def check_results(dirname, compl, tmax=10):
             inv_subs = [row for row in reader]
 
         # Only need functions with non-trivial inverse subs
-        shufidx = np.array([i for i in range(len(inv_subs)) if len(inv_subs[i]) != 0])
+        shufidx = np.array(
+            [i for i in range(len(inv_subs)) if len(inv_subs[i]) != 0], dtype=int
+        )
         np.random.seed(1234)
         #  Shuffle to make each rank more similar
         np.random.shuffle(shufidx)
@@ -1734,8 +1786,11 @@ def check_results(dirname, compl, tmax=10):
     comm.Barrier()
     nfun = comm.bcast(nfun, root=0)
 
-    imin, imax = utils.split_idx(nfun, rank, size)
-    imax += 1
+    i = utils.split_idx(nfun, rank, size)
+    if len(i) == 0:
+        imin, imax = 0, 0
+    else:
+        imin, imax = i[0], i[1] + 1
     imin = comm.gather(imin, root=0)
     imax = comm.gather(imax, root=0)
 
@@ -1769,16 +1824,14 @@ def check_results(dirname, compl, tmax=10):
     matches = comm.scatter(matches, root=0)
 
     param_list = [f"a{i}" for i in range(max_param)]
-    all_a = sympy.symbols(" ".join(param_list), real=True)
-    if max_param == 1:
-        all_a = [all_a]
+    all_a = sympy.symbols(param_list, real=True)
     locs = sympy_locs
-    if max_param > 0:
-        for i in range(len(all_a)):
-            locs[f"a{i}"] = all_a[i]
+    for i in range(len(all_a)):
+        locs[f"a{i}"] = all_a[i]
 
     to_change = []
-    imin, imax = utils.split_idx(nfun, rank, size)
+    i = utils.split_idx(nfun, rank, size)
+    imin = i[0] if len(i) > 0 else 0
 
     for i in range(len(all_fun)):
         if rank == 0 and (i % 100) == 0:
@@ -1792,7 +1845,7 @@ def check_results(dirname, compl, tmax=10):
             print(f"Could not check {uniq_fun[matches[i]]} so will keep equation")
             s2 = None
 
-        p = sympy.Array(sympy.symbols(" ".join(param_list), real=True))
+        p = sympy.Array(sympy.symbols(param_list, real=True))
 
         try:
             if s2 is None:
