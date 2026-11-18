@@ -32,18 +32,13 @@ def keys_match(f, g):
     return any(a[0] == b[0] or a[1] == b[1] for a in kf for b in kg)
 
 
-def test_intervals_of_constants():
-    assert C("+", A, A).iv == ue.REAL
-    assert C("inv", A).iv == ue.REAL
-    assert C("pow", A, A).iv == (0.0, np.inf)
-    assert C("sqrt_abs", A).iv == (0.0, np.inf)
-    assert C("exp", A).iv == (0.0, np.inf)
-    assert C("sin", A).iv == (-1.0, 1.0)
-    assert C("+", C("exp", A), ue._leaf("1", VP)).iv == (1.0, np.inf)
-    # x/x is the number 1, so 1 - c (c >= 0) is a constant in (-inf, 1]
+def test_parameter_only_pieces_are_one_parameter():
+    for f in [C("+", A, A), C("inv", A), C("pow", A, A), C("exp", A), C("sin", A)]:
+        assert f.kind == "const" and f.iv == ue.REAL
+    # x/x is the number 1, so 1 - pow(a0, a1) is a constant too
     one = C("/", X, X)
     assert not one.has_var
-    assert C("-", one, C("pow", A, A)).iv == (-np.inf, 1.0)
+    assert C("-", one, C("pow", A, A)).kind == "const"
 
 
 @pytest.mark.parametrize(
@@ -59,6 +54,15 @@ def test_intervals_of_constants():
         (C("pow", C("+", X, A), A), C("pow", C("-", A, X), A)),
         # |a0|^x with a real a0 and c^x with c >= 0
         (C("pow", A, X), C("pow", C("pow", A, A), X)),
+        # a Gaussian written two ways: log|f| = u + v*x^2 for both, with values
+        # that overflow far out and members of both signs
+        (
+            C("*", A, C("exp", C("*", A, C("square", X)))),
+            C("/", C("pow", A, C("square", X)), A),
+        ),
+        # a piece of parameters only is one parameter, whatever its range
+        (A, C("pow", A, A)),
+        (C("+", X, A), C("+", X, C("exp", A))),
     ],
 )
 def test_equal_families_have_equal_keys(f, g):
@@ -68,8 +72,6 @@ def test_equal_families_have_equal_keys(f, g):
 @pytest.mark.parametrize(
     "f, g",
     [
-        (A, C("pow", A, A)),  # any real vs non-negative constant
-        (C("+", X, A), C("+", X, C("pow", A, A))),
         (C("*", A, C("pow", A, X)), C("pow", A, C("+", X, A))),  # C b^x vs C > 0
         (C("+", X, A), C("-", A, X)),
     ],
@@ -117,12 +119,21 @@ def test_core_maths_is_duplicate_free_and_parsable():
     levels = E.run(4, verbose=False)
     strings = [f.string() for c in levels for f in levels[c]]
     assert len(strings) == len(set(strings))
-    assert "x*a0" in strings and "pow(a0, a1)" in strings
+    assert "x*a0" in strings and "pow(a0, a1)" not in strings
     for s in strings:
         sympy.sympify(s, locals=sympy_locs)
     # each function is listed only at its lowest complexity
     assert "a0" in [f.string() for f in levels[1]]
     assert all("a0+a1" != f.string() for f in levels[3])
+
+
+def test_parallel_keys_give_the_same_catalogue():
+    basis = builtin_basis_functions("core_maths")
+    serial = ue.Enumerator(basis, ["x"]).run(5, verbose=False)
+    parallel = ue.Enumerator(basis, ["x"]).run(5, verbose=False, processes=2)
+    assert [[f.string() for f in serial[c]] for c in serial] == [
+        [f.string() for f in parallel[c]] for c in parallel
+    ]
 
 
 def test_main_writes_catalogue_and_fits(tmp_path):
@@ -158,3 +169,18 @@ def test_main_writes_catalogue_and_fits(tmp_path):
     with open(os.path.join(likelihood.out_dir, "final_3.dat")) as f:
         best = f.readline().split(";")[1]
     assert best == "x*a0"
+
+
+@pytest.mark.parametrize("op", sorted(ue.UNARY))
+def test_likelihood_parses_every_unary_operator(op, tmp_path):
+    """Catalogue strings use the basis names (e.g. sqrt_abs), which the
+    likelihood must turn into functions numpy can evaluate."""
+    x = np.linspace(0.5, 3, 20)
+    np.savetxt(tmp_path / "data.txt", np.c_[x, x, np.full(20, 0.1)])
+    likelihood = GaussLikelihood(
+        "data.txt", "ops", data_dir=str(tmp_path), base_out_dir=str(tmp_path / "out")
+    )
+    _, eq, _ = likelihood.run_sympify(f"{op}(x)")
+    f = sympy.lambdify([sympy.Symbol("x", positive=True)], eq, modules=["numpy"])
+    expected = ue.UNARY[op](x)
+    assert np.allclose(f(x), expected)

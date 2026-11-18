@@ -16,12 +16,10 @@ Method
    complexities, and never to their duplicates. Commutative operators are
    applied to each unordered pair only once.
 
-2. *Parameters as typed constants.* A subtree containing parameters but no
-   variables is a constant whose possible values form an interval. As every
-   parameter appears once, interval arithmetic gives that interval exactly:
-   ``a``, ``a+a``, ``inv(a)`` and ``log_abs(a)`` are all "any real", while
-   ``exp(a)`` and ``sqrt_abs(a)`` are "any non-negative real". Within a
-   function each such subtree is one *slot* taking values in its interval.
+2. *Parameters only.* A subtree containing parameters but no variables, such
+   as ``a0 + a1``, ``inv(a0)``, ``exp(a0)`` or ``pow(a0, a1)``, is fitted like
+   a single parameter, so it is treated as one: ``x + exp(a0)`` is the same
+   function as ``x + a0``. Within a function each such subtree is one *slot*.
 
 3. *Numerical keys.* Functions are evaluated at fixed sample points of the
    variables. Each function gets one or more keys, which are invariants of
@@ -67,8 +65,10 @@ region of an affine subspace (e.g. ``(a0 - x)*(a1 - x)``) may be merged into
 the full family containing it.
 """
 
+import contextlib
 import hashlib
 import itertools
+import multiprocessing
 import os
 import sys
 import zlib
@@ -422,6 +422,10 @@ class Func:
             right = f"({right})"
         return f"{left}{self.op}{right}"
 
+    def tree(self):
+        """The tree as nested tuples ``(op, *children)``, leaves ``(label,)``."""
+        return (self.op,) + tuple(k.tree() for k in self.kids)
+
     def aifeyn(self):
         if self._aifeyn is None:
             labels = self.prefix()
@@ -481,7 +485,11 @@ def _combine(op, kids):
                 return None
             f.kind, f.V = "fixed", np.full(N_POINTS, iv[0])
             return f
-        f.kind, f.iv = "const", iv
+        # A function of parameters only is fitted like a single parameter, so
+        # its range is not kept: exp(a0) or pow(a0, a1) is simply a0. (The
+        # interval above only serves to spot constants that are undefined or
+        # that do not depend on their parameters.)
+        f.kind, f.iv = "const", REAL
         return f
 
     f.kind = "family"
@@ -624,7 +632,7 @@ class _Keyer:
                 return None
             signs = set(sg[:, 0])
             if len(signs) == 2:
-                if not self._reaches(f, ivs, t0, fin, -S[ok][:3][:, fin], "id", rng):
+                if not self._negation_closed(f, ivs, t0, fin, rng):
                     return None
                 sign = b"+-"
             else:
@@ -689,9 +697,14 @@ class _Keyer:
         d = rng.normal(0.0, 1.0, (n_dir, r))
         d /= np.linalg.norm(d, axis=1)[:, None]
         best = np.tile([_from_slot(iv, t) for iv, t in zip(ivs, t0)], (n_dir, 1))
+        # Targets must be values a float can hold: for log|f|, |log f| beyond
+        # about 709 overflows (e.g. log|f| = u + v*x^2 far out needs exp(25*v))
+        limit = 600.0 if name == "log" else 1e200
         for scale in [0.3, 1.0, 3.0, 10.0]:
             c_target = scale * base * d  # (n_dir, r)
             Y = TV0[fin] + c_target @ Q
+            if scale > 0.3 and np.max(np.abs(Y)) > limit:
+                break
             starts = [best[:, None, :]]
             if len(c_pool) >= n_near:
                 dist = np.linalg.norm(c_pool[None] - c_target[:, None], axis=2)
@@ -718,6 +731,26 @@ class _Keyer:
                 return False
             best = U.reshape(n_dir, n_start, k)[np.arange(n_dir), res.argmin(axis=1)]
         return True
+
+    def _negation_closed(self, f, ivs, t0, fin, rng):
+        """Whether ``-F`` is in the family for every member ``F``.
+
+        First tries flipping the sign of one real slot (``a0*g`` with
+        ``a0 -> -a0``), which needs no solve; otherwise solves for ``-F`` at a
+        few random members.
+        """
+        th = _random_values(ivs, rng, 3)
+        F = _family_eval(f, th)[:, fin]
+        good = np.all(np.isfinite(F), axis=0)
+        for j, iv in enumerate(ivs):
+            if iv != REAL:
+                continue
+            flipped = th.copy()
+            flipped[:, j] *= -1
+            G = _family_eval(f, flipped)[:, fin]
+            if np.allclose(G[:, good], -F[:, good], rtol=1e-9, atol=0):
+                return True
+        return self._reaches(f, ivs, t0, fin, -F, "id", rng)
 
     def _reaches(self, f, ivs, t0, fin, Y, name, rng):
         """Whether ``T(F(theta)) = y`` can be solved for every row ``y`` of
@@ -823,7 +856,7 @@ def _batched_least_squares(
     eye = np.eye(k)
     last = cost.copy()
     for it in range(n_iter):
-        h = 1e-7 * np.maximum(np.abs(U), 1e-12)
+        h = 1e-7 * np.maximum(np.abs(U), 1e-250)
         pert = np.repeat(U, k, axis=0) + (h[:, :, None] * eye).reshape(-1, k)
         Fp = evaluate(pert).reshape(len(U), k, -1)
         J = (Fp - (R + Y)[:, None, :]) / h[:, :, None]  # (P, k, n)
@@ -871,6 +904,9 @@ def _batched_least_squares(
 # ---------------------------------------------------------------------------
 
 
+_COMPUTE = object()  # _offer: compute the keys
+
+
 def _variable_points(name):
     rs = np.random.RandomState(zlib.crc32(("unique_enumerator:" + name).encode()))
     return rs.uniform(0.2, 5.0, N_POINTS)
@@ -896,6 +932,9 @@ class Enumerator:
         for op in binary:
             if op not in BINARY:
                 raise ValueError(f"Binary operator {op!r} is not supported")
+        self._basis = [list(nullary), list(unary), list(binary)]
+        self._variables = list(variables)
+        self._c = None
         self.nullary = list(nullary)
         self.unary = list(unary)
         self.binary = list(binary)
@@ -905,14 +944,15 @@ class Enumerator:
         self._seen = ({}, {})
         self.n_candidates = {}
 
-    def _offer(self, f, c):
+    def _offer(self, f, c, keys=_COMPUTE):
         """Keep ``f`` if it is new. If it is the same as a function already
         kept at this complexity, keep whichever tree has the lower ``aifeyn``
         contribution, preferring trees affine in their parameters (which are
         easier to fit) and then shorter strings."""
         if f is None:
             return
-        keys = self.keyer.key(f)
+        if keys is _COMPUTE:
+            keys = self.keyer.key(f)
         if keys is None:
             return
         old = None
@@ -934,32 +974,80 @@ class Enumerator:
                 for attr in Func.__slots__:
                     setattr(old, attr, getattr(f, attr))
 
-    def run(self, compl, verbose=True):
-        """Enumerate all functions up to complexity ``compl``."""
+    def _candidates(self, c):
+        """Descriptors of the candidates of complexity ``c`` (``c >= 2``), in
+        the order they are offered."""
+        for op in self.unary:
+            for ig in range(len(self.levels[c - 1])):
+                yield ("u", op, ig)
+        for op in self.binary:
+            for i in range(1, c - 1):
+                j = c - 1 - i
+                if op in COMMUTATIVE and i > j:
+                    continue
+                for ia in range(len(self.levels[i])):
+                    start = ia if (op in COMMUTATIVE and i == j) else 0
+                    for ib in range(start, len(self.levels[j])):
+                        yield ("b", op, i, ia, j, ib)
+
+    def _build(self, d):
+        """The candidate ``Func`` described by ``d``."""
+        if d[0] == "u":
+            _, op, ig = d
+            return _combine(op, [self.levels[self._c - 1][ig]])
+        _, op, i, ia, j, ib = d
+        return _combine(op, [self.levels[i][ia], self.levels[j][ib]])
+
+    def run(self, compl, verbose=True, processes=1):
+        """Enumerate all functions up to complexity ``compl``.
+
+        Args:
+            :compl (int): maximum complexity
+            :verbose (bool, default=True): whether to print progress
+            :processes (int, default=1): number of processes computing the
+                keys of the candidates. Which functions are kept does not
+                depend on it. The processes are started with ``spawn``, so a
+                script calling this must guard its top level with
+                ``if __name__ == "__main__":``.
+        """
         for c in range(1, compl + 1):
             if c in self.levels:
                 continue
             self.levels[c] = []
+            self._c = c
             n = 0
             if c == 1:
                 for label in self.nullary:
                     n += 1
                     self._offer(_leaf(label, self.var_points), c)
+            elif processes <= 1:
+                for d in self._candidates(c):
+                    n += 1
+                    self._offer(self._build(d), c)
             else:
-                for op in self.unary:
-                    for g in self.levels[c - 1]:
+                # Workers are started afresh ("spawn"), each rebuilding the
+                # functions kept so far from their trees, as forking a process
+                # that has used numpy's BLAS is not safe on every platform
+                trees = {lc: [f.tree() for f in fs] for lc, fs in self.levels.items()}
+                init = (self._basis, self._variables, trees, c)
+                ctx = multiprocessing.get_context("spawn")
+                with _single_threaded_blas(), ctx.Pool(
+                    processes, initializer=_pool_init, initargs=init
+                ) as pool:
+                    for d, res in zip(
+                        self._candidates(c),
+                        pool.imap(_pool_key, self._candidates(c), chunksize=64),
+                    ):
                         n += 1
-                        self._offer(_combine(op, [g]), c)
-                for op in self.binary:
-                    for i in range(1, c - 1):
-                        j = c - 1 - i
-                        if op in COMMUTATIVE and i > j:
+                        if res is None:
                             continue
-                        for ia, fa in enumerate(self.levels[i]):
-                            start = ia if (op in COMMUTATIVE and i == j) else 0
-                            for fb in self.levels[j][start:]:
-                                n += 1
-                                self._offer(_combine(op, [fa, fb]), c)
+                        keys, linear, deficient = res
+                        self.keyer.n_deficient += deficient
+                        if keys is None:
+                            continue
+                        f = self._build(d)
+                        f.linear = linear
+                        self._offer(f, c, keys)
             self.n_candidates[c] = n
             if verbose:
                 print(
@@ -968,6 +1056,56 @@ class Enumerator:
                     flush=True,
                 )
         return self.levels
+
+
+_POOL_ENUMERATOR = None  # in a worker: the Enumerator whose candidates it keys
+
+
+@contextlib.contextmanager
+def _single_threaded_blas():
+    """Make processes started inside the block use one BLAS thread each."""
+    names = [
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ]
+    old = {k: os.environ.get(k) for k in names}
+    os.environ.update({k: "1" for k in names})
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _rebuild(tree, var_points):
+    if len(tree) == 1:
+        return _leaf(tree[0], var_points)
+    return _combine(tree[0], [_rebuild(t, var_points) for t in tree[1:]])
+
+
+def _pool_init(basis, variables, trees, c):
+    """Worker set-up: an Enumerator holding the functions kept so far."""
+    global _POOL_ENUMERATOR
+    E = Enumerator(basis, variables)
+    E.levels = {lc: [_rebuild(t, E.var_points) for t in ts] for lc, ts in trees.items()}
+    E._c = c
+    _POOL_ENUMERATOR = E
+
+
+def _pool_key(d):
+    """Keys of the candidate ``d`` (in a worker)."""
+    E = _POOL_ENUMERATOR
+    f = E._build(d)
+    if f is None:
+        return None
+    before = E.keyer.n_deficient
+    keys = E.keyer.key(f)
+    return keys, f.linear, E.keyer.n_deficient - before
 
 
 def write_catalogue(levels, dirname):
@@ -992,7 +1130,13 @@ def write_catalogue(levels, dirname):
 
 
 def main(
-    runname, compl, variables=None, basis_functions=None, fn_dir=None, verbose=True
+    runname,
+    compl,
+    variables=None,
+    basis_functions=None,
+    fn_dir=None,
+    verbose=True,
+    processes=1,
 ):
     """Enumerate the distinct functions up to a given complexity and save them.
 
@@ -1009,6 +1153,9 @@ def main(
         :fn_dir (str, default=None): output directory; by default the
             directory a likelihood with ``fn_set=runname`` reads from
         :verbose (bool, default=True): whether to print progress
+        :processes (int, default=1): number of processes computing keys (see
+            ``Enumerator.run``); run without ``mpirun``, as rank 0 does all
+            the work
 
     Returns:
         :levels (dict): ``levels[c]`` is the list of ``Func`` of complexity
@@ -1036,7 +1183,9 @@ def main(
     if rank == 0:
         if verbose:
             print("Basis functions:", basis_functions, flush=True)
-        levels = Enumerator(basis_functions, variables).run(compl, verbose=verbose)
+        levels = Enumerator(basis_functions, variables).run(
+            compl, verbose=verbose, processes=processes
+        )
         write_catalogue(levels, dirname)
         if verbose:
             total = sum(len(v) for v in levels.values())

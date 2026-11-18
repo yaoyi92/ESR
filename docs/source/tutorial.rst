@@ -72,7 +72,8 @@ The method: functions are built bottom-up by complexity from the functions
 already kept (if a tree is as short as possible, so is each of its subtrees),
 and each one is identified by a numerical key rather than by symbolic
 simplification. A subtree of parameters only (``a0 + a1``, ``inv(a0)``,
-``exp(a0)``) is one constant, whose range follows from interval arithmetic.
+``exp(a0)``) is fitted like a single parameter, so it is treated as one:
+``x + exp(a0)`` is the same function as ``x + a0``.
 Two parametric families are the same if they fill the same affine subspace of
 function space after applying ``f``, ``1/f`` or ``log|f|`` (which covers
 reparametrisations such as ``a0*(x + a1)`` and ``a0*x + a1``), or if they take
@@ -83,7 +84,7 @@ smaller families. See the module docstring for details.
 
 Equality is tested numerically, so it is not a proof. For ``core_maths`` up to
 complexity 7, an independent check (fitting each family to members of the
-other) finds 7 pairs of equal families out of 1186, all related by a
+other) finds 5 pairs of equal families out of 1091, all related by a
 reparametrisation outside those above (e.g. ``pow(x, a0) - x*a1`` and
 ``x*(pow(x, a0) - a1)``, related by ``a0 -> a0 + 1``), against about 1000
 repeats in the ``duplicate_checker`` catalogue. A family that fills all but a
